@@ -1,9 +1,0 @@
-{
-    "weights": {
-        "depth": 0.25,
-        "impact": 0.25,
-        "consistency": 0.25,
-        "quality": 0.25
-    },
-    "github_token": "PASTE_YOUR_NEW_TOKEN_HERE"
-}
