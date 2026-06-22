@@ -1,15 +1,21 @@
+
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 import requests
 from datetime import datetime
+from database import db, DeveloperProfile, Job, Application
+from config import Config
+import json
 
 app = Flask(__name__)
-app.config['DEBUG'] = True
+app.config.from_object(Config)
+db.init_app(app)
 CORS(app)
 
-# Mock database
-profiles_db = {}
-jobs_db = {}
+# Create tables
+with app.app_context():
+    db.create_all()
+    print("✅ Database initialized!")
 
 # ============ PAGES ============
 
@@ -29,7 +35,7 @@ def hr_dashboard():
 
 @app.route('/api/analyze', methods=['POST'])
 def analyze():
-    """Analyze GitHub profile"""
+    """Analyze GitHub profile and save to database"""
     try:
         print("✅ Analyze request received!")
         
@@ -40,6 +46,26 @@ def analyze():
         
         if not username:
             return jsonify({'error': 'Username required'}), 400
+        
+        # Check if already analyzed
+        existing = DeveloperProfile.query.filter_by(username=username).first()
+        if existing:
+            print(f"✅ Using cached profile for {username}")
+            skills = json.loads(existing.detected_skills) if existing.detected_skills else []
+            return jsonify({
+                'username': existing.username,
+                'overall_score': existing.overall_score,
+                'seniority_level': existing.seniority_level,
+                'public_repos': existing.public_repos,
+                'followers': existing.followers,
+                'detected_skills': skills,
+                'github_url': existing.github_url,
+                'avatar_url': existing.avatar_url,
+                'bio': existing.bio,
+                'company': existing.company,
+                'location': existing.location,
+                'total_stars': existing.total_stars
+            })
         
         # Fetch from GitHub
         print(f"🔄 Fetching GitHub data for {username}...")
@@ -97,31 +123,57 @@ def analyze():
         else:
             seniority = 'Junior'
         
-        # Simple skill detection
+        # Skill detection
         bio_text = (bio + ' ' + ' '.join([r.get('name', '') for r in repos[:5]])).lower()
         
         skills = []
-        if 'python' in bio_text:
-            skills.append({'name': 'Python', 'confidence': 0.85})
-        if 'javascript' in bio_text or 'js' in bio_text:
-            skills.append({'name': 'JavaScript', 'confidence': 0.85})
-        if 'java' in bio_text:
-            skills.append({'name': 'Java', 'confidence': 0.85})
-        if 'docker' in bio_text:
-            skills.append({'name': 'Docker', 'confidence': 0.85})
-        if 'aws' in bio_text:
-            skills.append({'name': 'AWS', 'confidence': 0.85})
-        if 'react' in bio_text:
-            skills.append({'name': 'React', 'confidence': 0.85})
-        if 'node' in bio_text:
-            skills.append({'name': 'Node.js', 'confidence': 0.85})
-        if 'git' in bio_text:
-            skills.append({'name': 'Git', 'confidence': 0.85})
+        skill_keywords = {
+            'Python': ['python', 'django', 'flask'],
+            'JavaScript': ['javascript', 'js', 'react', 'node'],
+            'Java': ['java', 'spring'],
+            'Docker': ['docker', 'container'],
+            'AWS': ['aws', 'amazon', 's3'],
+            'GCP': ['gcp', 'google cloud'],
+            'Azure': ['azure', 'microsoft cloud'],
+            'MongoDB': ['mongodb', 'mongo'],
+            'PostgreSQL': ['postgresql', 'postgres', 'sql'],
+            'Git': ['git', 'github', 'gitlab'],
+            'Kubernetes': ['kubernetes', 'k8s'],
+            'DevOps': ['devops', 'ci/cd', 'jenkins'],
+            'Machine Learning': ['machine learning', 'ml', 'tensorflow', 'pytorch'],
+            'React': ['react', 'reactjs'],
+            'Vue': ['vue', 'vuejs']
+        }
+        
+        for skill, keywords in skill_keywords.items():
+            if any(keyword in bio_text for keyword in keywords):
+                skills.append({'name': skill, 'confidence': 0.85})
         
         if not skills:
             skills = [{'name': 'GitHub User', 'confidence': 0.85}]
         
-        analysis = {
+        # Save to database
+        profile = DeveloperProfile(
+            username=username,
+            overall_score=round(total_score, 2),
+            seniority_level=seniority,
+            public_repos=public_repos,
+            followers=followers,
+            detected_skills=json.dumps(skills),
+            avatar_url=github_data.get('avatar_url'),
+            bio=bio,
+            github_url=github_data.get('html_url'),
+            company=github_data.get('company', 'N/A'),
+            location=github_data.get('location', 'N/A'),
+            total_stars=total_stars
+        )
+        
+        db.session.add(profile)
+        db.session.commit()
+        
+        print(f"✅ Analysis complete! Score: {total_score}")
+        
+        return jsonify({
             'username': username,
             'overall_score': round(total_score, 2),
             'seniority_level': seniority,
@@ -134,19 +186,7 @@ def analyze():
             'company': github_data.get('company', 'N/A'),
             'location': github_data.get('location', 'N/A'),
             'total_stars': total_stars
-        }
-        
-        # Save to database
-        profiles_db[username] = {
-            'username': username,
-            'github_data': github_data,
-            'analysis': analysis,
-            'analyzed_at': datetime.now()
-        }
-        
-        print(f"✅ Analysis complete! Score: {total_score}")
-        
-        return jsonify(analysis)
+        })
     
     except Exception as e:
         print(f"❌ ERROR: {str(e)}")
@@ -154,49 +194,128 @@ def analyze():
         traceback.print_exc()
         return jsonify({'error': f'Error: {str(e)}'}), 500
 
-# ============ API - RECOMMENDATIONS ============
+# ============ API - POST JOB ============
+
+@app.route('/api/post-job', methods=['POST'])
+def post_job():
+    """Post a new job"""
+    try:
+        data = request.json
+        
+        job = Job(
+            title=data.get('title'),
+            company=data.get('company'),
+            description=data.get('description'),
+            required_skills=','.join(data.get('skills', [])),
+            salary_min=data.get('salary_min', 0),
+            salary_max=data.get('salary_max', 0),
+            experience_level=data.get('experience_level'),
+            location=data.get('location', ''),
+            posted_by=data.get('posted_by', 'HR'),
+            status='active'
+        )
+        
+        db.session.add(job)
+        db.session.commit()
+        
+        print(f"✅ Job posted: {job.title} (ID: {job.id})")
+        
+        return jsonify({
+            'message': 'Job posted successfully',
+            'job_id': job.id
+        })
+    
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+# ============ API - REAL JOB MATCHING ============
 
 @app.route('/api/recommendations', methods=['POST'])
 def recommendations():
-    """Get job recommendations"""
+    """Get REAL job recommendations based on skills and experience"""
     try:
         data = request.json
         username = data.get('username')
         
-        if username not in profiles_db:
-            return jsonify({'error': 'Profile not found'}), 404
+        print(f"🔍 Finding jobs for: {username}")
         
-        # Return mock recommendations
-        recommendations = [
-            {
-                'job_id': '1',
-                'title': 'Senior Python Developer',
-                'company': 'Google',
-                'match_score': 0.85,
-                'salary_min': 100000,
-                'salary_max': 150000
-            },
-            {
-                'job_id': '2',
-                'title': 'Full Stack Developer',
-                'company': 'Microsoft',
-                'match_score': 0.72,
-                'salary_min': 90000,
-                'salary_max': 130000
-            },
-            {
-                'job_id': '3',
-                'title': 'Backend Engineer',
-                'company': 'Amazon',
-                'match_score': 0.68,
-                'salary_min': 95000,
-                'salary_max': 135000
-            }
-        ]
+        # Get developer profile
+        dev = DeveloperProfile.query.filter_by(username=username).first()
+        if not dev:
+            return jsonify({'error': 'Profile not found. Analyze first!'}), 404
         
-        return jsonify({'recommendations': recommendations})
+        # Get all active jobs
+        jobs = Job.query.filter_by(status='active').all()
+        
+        if not jobs:
+            print("⚠️ No jobs in database")
+            return jsonify({'recommendations': []})
+        
+        # Parse developer skills
+        dev_skills = json.loads(dev.detected_skills) if dev.detected_skills else []
+        dev_skill_names = [s['name'] for s in dev_skills]
+        
+        print(f"👤 Developer: {dev.username}, Skills: {dev_skill_names}, Level: {dev.seniority_level}")
+        
+        recommendations = []
+        
+        for job in jobs:
+            job_skills = [s.strip() for s in job.required_skills.split(',') if s.strip()]
+            
+            # ============ SKILL MATCHING ============
+            matching_skills = sum(1 for skill in job_skills if skill in dev_skill_names)
+            skill_match = matching_skills / len(job_skills) if job_skills else 0
+            
+            # ============ SENIORITY MATCHING ============
+            seniority_match = 0
+            if dev.seniority_level == job.experience_level:
+                seniority_match = 1.0
+            elif dev.seniority_level == 'Senior' and job.experience_level in ['Mid-Level', 'Junior']:
+                seniority_match = 0.9
+            elif dev.seniority_level == 'Mid-Level' and job.experience_level == 'Junior':
+                seniority_match = 0.9
+            elif dev.seniority_level == 'Mid-Level' and job.experience_level == 'Senior':
+                seniority_match = 0.7
+            elif dev.seniority_level == 'Junior' and job.experience_level == 'Mid-Level':
+                seniority_match = 0.6
+            else:
+                seniority_match = 0.5
+            
+            # ============ FINAL MATCH SCORE ============
+            # 60% skills, 40% seniority
+            final_score = (skill_match * 0.6) + (seniority_match * 0.4)
+            
+            # Only show jobs with >30% match
+            if final_score > 0.3:
+                recommendations.append({
+                    'job_id': job.id,
+                    'title': job.title,
+                    'company': job.company,
+                    'description': job.description,
+                    'required_skills': job_skills,
+                    'match_score': round(final_score, 2),
+                    'skill_match': round(skill_match, 2),
+                    'seniority_match': round(seniority_match, 2),
+                    'salary_min': job.salary_min,
+                    'salary_max': job.salary_max,
+                    'experience_level': job.experience_level,
+                    'location': job.location
+                })
+        
+        # Sort by match score
+        recommendations.sort(key=lambda x: x['match_score'], reverse=True)
+        
+        print(f"✅ Found {len(recommendations)} matching jobs")
+        
+        return jsonify({'recommendations': recommendations[:10]})
     
     except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 # ============ API - SALARY ============
@@ -209,9 +328,14 @@ def predict_salary():
         skills = data.get('skills', [])
         seniority = data.get('seniority', 'mid').lower()
         
-        base = {'junior': 40000, 'mid-level': 80000, 'mid': 80000, 'senior': 120000}.get(seniority, 80000)
+        base = {
+            'junior': 40000, 
+            'mid-level': 80000, 
+            'mid': 80000, 
+            'senior': 120000
+        }.get(seniority, 80000)
         
-        premium = ['Docker', 'AWS', 'Machine Learning']
+        premium = ['Docker', 'AWS', 'Machine Learning', 'Kubernetes', 'GCP', 'Azure']
         bonus = sum(1 for s in skills if s in premium) * 0.1
         
         adjusted = base * (1 + bonus)
@@ -231,6 +355,17 @@ def predict_salary():
 def health():
     return jsonify({'status': 'ok', 'message': 'Server running!'})
 
+# ============ API - GET ALL JOBS ============
+
+@app.route('/api/jobs', methods=['GET'])
+def get_all_jobs():
+    """Get all active jobs"""
+    try:
+        jobs = Job.query.filter_by(status='active').all()
+        return jsonify({'jobs': [j.to_dict() for j in jobs]})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # ============ ERROR HANDLERS ============
 
 @app.errorhandler(404)
@@ -247,189 +382,8 @@ if __name__ == '__main__':
     print("=" * 60)
     print("📍 Open: http://localhost:5000")
     print("=" * 60)
-    app.run(debug=True, port=5000, use_reloader=False)
-# ============ API - SUGGESTIONS ============
+    app.run(debug=True, port=5000, use_reloader=False)          
+              
 
-@app.route('/api/suggestions', methods=['POST'])
-def get_suggestions():
-    """Get improvement suggestions"""
-    try:
-        data = request.json
-        username = data.get('username')
-        
-        if username not in profiles_db:
-            return jsonify({'error': 'Profile not found. Analyze first!'}), 404
-        
-        profile = profiles_db[username]
-        analysis = profile['analysis']
-        
-        score = analysis['overall_score']
-        level = analysis['seniority_level']
-        skills = [s['name'] for s in analysis['detected_skills']]
-        repos = analysis['public_repos']
-        followers = analysis['followers']
-        
-        # ============ STRENGTHS ============
-        strengths = []
-        
-        if score >= 60:
-            strengths.append({
-                'title': '⭐ Strong Developer Profile',
-                'description': f'Your score of {score}/100 shows solid experience'
-            })
-        
-        if repos >= 20:
-            strengths.append({
-                'title': '📦 Productive Developer',
-                'description': f'You have {repos} public repositories - showing consistency'
-            })
-        
-        if followers >= 50:
-            strengths.append({
-                'title': '👥 Community Presence',
-                'description': f'{followers} followers - your work is noticed'
-            })
-        
-        if len(skills) >= 5:
-            strengths.append({
-                'title': '🛠️ Multi-skilled Developer',
-                'description': f'Knowledge in {len(skills)} different technologies'
-            })
-        
-        # ============ WEAKNESSES ============
-        weaknesses = []
-        
-        if score < 40:
-            weaknesses.append({
-                'title': '📉 Low Developer Score',
-                'description': f'Your score is {score}/100. Build more projects!',
-                'severity': 'HIGH'
-            })
-        
-        if repos < 5:
-            weaknesses.append({
-                'title': '📦 Lack of Portfolio',
-                'description': f'Only {repos} repos. Need more projects to showcase skills',
-                'severity': 'HIGH'
-            })
-        
-        if followers < 10:
-            weaknesses.append({
-                'title': '👥 Low Community Engagement',
-                'description': 'Few followers. Contribute to open source projects!',
-                'severity': 'MEDIUM'
-            })
-        
-        if len(skills) < 3:
-            weaknesses.append({
-                'title': '🛠️ Limited Tech Stack',
-                'description': f'Only {len(skills)} skills detected. Learn more technologies!',
-                'severity': 'MEDIUM'
-            })
-        
-        # ============ IMPROVEMENT PLAN ============
-        if level == 'Junior':
-            plan = [
-                {
-                    'step': 1,
-                    'title': '🎯 Build More Projects',
-                    'description': 'Create 5-10 small projects',
-                    'time': '2-3 months',
-                    'impact': '+15 score points'
-                },
-                {
-                    'step': 2,
-                    'title': '📚 Learn New Technologies',
-                    'description': 'Pick 3 new skills and master them',
-                    'time': '1-2 months per skill',
-                    'impact': '+10 score points'
-                },
-                {
-                    'step': 3,
-                    'title': '🔗 Contribute to Open Source',
-                    'description': 'Make 5-10 PRs to real open source projects',
-                    'time': '1-2 months',
-                    'impact': '+20 score points'
-                }
-            ]
-        elif level == 'Mid-Level':
-            plan = [
-                {
-                    'step': 1,
-                    'title': '🏗️ Build Complex Projects',
-                    'description': 'Create 2-3 production-grade applications',
-                    'time': '2-3 months',
-                    'impact': '+20 score points'
-                },
-                {
-                    'step': 2,
-                    'title': '☁️ Learn Cloud & DevOps',
-                    'description': 'Master deployment and infrastructure',
-                    'time': '6-8 weeks',
-                    'impact': '+15 score points'
-                },
-                {
-                    'step': 3,
-                    'title': '👨‍🏫 Help Others & Code Review',
-                    'description': 'Review pull requests, answer questions',
-                    'time': 'Ongoing',
-                    'impact': '+reputation'
-                }
-            ]
-        else:  # Senior
-            plan = [
-                {
-                    'step': 1,
-                    'title': '🚀 Lead Major Projects',
-                    'description': 'Own projects from concept to production',
-                    'time': 'Ongoing',
-                    'impact': '+recognition'
-                },
-                {
-                    'step': 2,
-                    'title': '🎓 Share Knowledge',
-                    'description': 'Create content and mentor others',
-                    'time': '5-10 hours/week',
-                    'impact': '+personal brand'
-                }
-            ]
-        
-        # ============ NEXT MILESTONE ============
-        if level == 'Junior':
-            milestone = {
-                'current': 'Junior',
-                'next': 'Mid-Level',
-                'target_score': 50,
-                'points_needed': max(0, 50 - score),
-                'time': '3-6 months',
-                'salary': 'From $40k to $80k'
-            }
-        elif level == 'Mid-Level':
-            milestone = {
-                'current': 'Mid-Level',
-                'next': 'Senior',
-                'target_score': 75,
-                'points_needed': max(0, 75 - score),
-                'time': '6-12 months',
-                'salary': 'From $80k to $120k+'
-            }
-        else:
-            milestone = {
-                'current': 'Senior',
-                'next': 'Tech Lead / Architect',
-                'target_score': 90,
-                'points_needed': max(0, 90 - score),
-                'time': '12+ months',
-                'salary': 'From $120k to $180k+'
-            }
-        
-        return jsonify({
-            'strengths': strengths,
-            'weaknesses': weaknesses,
-            'improvement_plan': plan,
-            'next_milestone': milestone
-        })
-    
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return jsonify({'error': str(e)}), 500
+
+                
