@@ -1,3 +1,11 @@
+github-analyzer/
+├── README.md          ← Place here!
+├── app.py
+├── config.py
+├── database.py
+├── requirements.txt
+└── ...
+
 GitHub Analyzer : It simplys analyze the github and tell what you need to improve ad what skills you need to improve 
 
 A Python-based tool to evaluate GitHub profiles for recruiters, developers, or hackathon participants. It fetches GitHub data, calculates metrics, generates actionable feedback, and predicts the profile strength using a simple ML model.
